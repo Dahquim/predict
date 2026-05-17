@@ -55,6 +55,8 @@ cython_debug/
 *.swo
 
 # Datasets (consider excluding large datasets or sensitive information)
+datasets/
+test_images/
 *.csv
 *.tsv
 *.xlsx

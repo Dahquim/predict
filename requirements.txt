@@ -1,3 +1,5 @@
+# Install PyTorch + torchvision for your GPU first — see README.md (AMD ROCm / NVIDIA CUDA).
+# Do not rely on a bare `pip install -r requirements.txt` alone for GPU training on AMD.
 flask
 torch
 torchvision
@@ -6,3 +8,4 @@ gunicorn
 python-dotenv
 timm
 numpy
+scipy

@@ -1,62 +1,84 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from flask import Flask, request, jsonify
 import base64
-from io import BytesIO
-from PIL import Image
-import torch
-from torchvision import transforms
-from utils import load_model
-from torchvision.models import resnet152
-import os
 import logging
+import os
+from io import BytesIO
+
+from flask import Flask, jsonify, request
+from PIL import Image
+
+from device import get_device, use_gpu_enabled
+from inference import load_inference_model, predict_image
 
 app = Flask(__name__)
-
 logging.basicConfig(level=logging.INFO)
 
-filename = os.getenv('MODEL_PATH', "resources\\resnet152_weights_best_acc.tar")  # pre-trained model path
-num_classes = int(os.getenv('NUM_CLASSES', 1081))  # number of classes in the model
-use_gpu = os.getenv('USE_GPU', False).lower() in ('true', '1', 't')  # load weights on the gpu
+USE_GPU = os.getenv('USE_GPU', 'false').lower() in ('true', '1', 't')
+CHECKPOINT_PATH = os.getenv('CHECKPOINT', 'datasets/oxford102/model/resnet152_oxford102.pth')
 
-model = resnet152(num_classes=num_classes)
-load_model(model, filename=filename, use_gpu=use_gpu)  # load the model
-model.eval()
+device = get_device(use_gpu_enabled(USE_GPU))
 
-transform = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225])
-])
+try:
+    model, CLASS_NAMES, transform, MODEL_META = load_inference_model(
+        CHECKPOINT_PATH, device=device, use_gpu=use_gpu_enabled(USE_GPU),
+    )
+    NUM_CLASSES = len(CLASS_NAMES)
+    logging.info('Loaded model from %s (%d classes)', CHECKPOINT_PATH, NUM_CLASSES)
+except FileNotFoundError:
+    logging.warning('Checkpoint not found at %s — endpoints will fail until trained', CHECKPOINT_PATH)
+    model = None
+    CLASS_NAMES = []
+    transform = None
+    MODEL_META = {}
+    NUM_CLASSES = 0
 
 
 @app.route('/predict', methods=['POST'])
 def predict():
+    """Predict flower class for a base64-encoded image (JSON field `image`)."""
+    if model is None:
+        return jsonify({'error': 'Model checkpoint not loaded'}), 503
+
     try:
         data = request.get_json(force=True)
-        image_data = data['image']
-        image_bytes = base64.b64decode(image_data)
-        image = Image.open(BytesIO(image_bytes))
+        image_bytes = base64.b64decode(data['image'])
+        image = Image.open(BytesIO(image_bytes)).convert('RGB')
 
-        image_tensor = transform(image).unsqueeze(0)
+        predictions = predict_image(
+            model, transform, CLASS_NAMES, image, device, top_k=5,
+        )
 
-        with torch.no_grad():
-            output = model(image_tensor)
-            _, predicted = torch.max(output.data, 1)
-
-        response = {'prediction': predicted.item()}
+        response = {
+            'prediction': predictions[0],
+            'top_5_predictions': predictions,
+            'confidence': predictions[0]['confidence'],
+        }
         return jsonify(response)
+
     except Exception as e:
-        logging.error(f"Error during prediction: {str(e)}")
+        logging.error('Error during prediction: %s', e)
         return jsonify({'error': 'Error during prediction'}), 500
 
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'healthy'}), 200
+    return jsonify({
+        'status': 'healthy',
+        'model_loaded': model is not None,
+        'device': str(device),
+        'num_classes': NUM_CLASSES,
+    }), 200
+
+
+@app.route('/classes', methods=['GET'])
+def list_classes():
+    return jsonify({
+        'total_classes': NUM_CLASSES,
+        'class_names': CLASS_NAMES,
+        'meta': MODEL_META,
+    }), 200
 
 
 if __name__ == '__main__':
